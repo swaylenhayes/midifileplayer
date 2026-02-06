@@ -25,6 +25,7 @@ pathes = ["MIDI INPUT", "MIDI OUTPUT", "SOUND FONT", "MIDI FILE", "BLUETOOTH"]
 files = ["MIDI INPUT", "MIDI OUTPUT", "SOUND FONT", "MIDI FILE", "BLUETOOTH"]
 selectedindex = 0
 use_bluetooth = 0
+midi_playback_active = False  # Track if a MIDI file is currently playing
 
 repo_path = os.path.dirname(os.path.abspath(__file__))
 display_type = "square"
@@ -261,7 +262,8 @@ def connect_ble_device(mac):
         raise RuntimeError(f"Connect failed for {mac}: {out.strip()}")
 
 def resetsynth():
-    global selectedindex, files, pathes, fs, operation_mode, previous_operation_mode, soundfontname
+    global selectedindex, files, pathes, fs, operation_mode, previous_operation_mode, soundfontname, midi_playback_active
+    midi_playback_active = False  # Signal any active playback thread to stop
     operation_mode = "main screen"
     pathes = ["MIDI INPUT", "MIDI OUTPUT", "SOUND FONT", "MIDI FILE", "BLUETOOTH"]
     files = ["MIDI INPUT", "MIDI OUTPUT", "SOUND FONT", "MIDI FILE", "BLUETOOTH"]
@@ -441,37 +443,44 @@ def handle_button(bt):
             if previous_operation_mode == operation_mode:
                 if midioutname == "FLUIDSYNTH":
                     operation_mode = "main screen"
-                    fs.delete()
-                    fs = fluidsynth.Synth()
-                    fs.start(driver="alsa")
-                    sfid = fs.sfload(soundfontname, True)
-                    fs.play_midi_file(pathes[selectedindex])
+                    # Play in a background thread so buttons keep working
+                    midi_file_path = pathes[selectedindex]
+                    def _play_fluidsynth(filepath):
+                        global fs, midi_playback_active
+                        midi_playback_active = True
+                        # Reuse existing synth - just play the file
+                        fs.play_midi_file(filepath)
+                        midi_playback_active = False
+                    playback_thread = threading.Thread(target=_play_fluidsynth, args=(midi_file_path,), daemon=True)
+                    playback_thread.start()
                 else:
                     operation_mode = "main screen"
                     midifilems = pathes[selectedindex]      # MIDI file path
                     portnamems = midioutname               # Full RtMidi port name
-                    # --- MIDO PLAYBACK REPLACEMENT ---
-                    # Find the matching MIDO output port
-                    outport_name = None
-                    for name in mido.get_output_names():
-                        if portnamems in name or name in portnamems:
-                            outport_name = name
-                            break
-                    if outport_name is None:
-                        print("ERROR: Could not find matching MIDO output port!")
-                    else:
-                        # Open the output port
-                        outport = mido.open_output(outport_name)
-                        # Load the MIDI file
-                        mid = mido.MidiFile(midifilems)
-                        # Playback loop
-                        start_time = time.time()
-                        for msg in mid:
-                            time.sleep(msg.time)   # msg.time is delta-time in seconds
-                            if not msg.is_meta:
-                                outport.send(msg)
-                        outport.close()
-                    # --- END MIDO PLAYBACK ---
+                    # Play MIDO in a background thread so buttons keep working
+                    def _play_mido(filepath, portname):
+                        global midi_playback_active
+                        midi_playback_active = True
+                        outport_name = None
+                        for name in mido.get_output_names():
+                            if portname in name or name in portname:
+                                outport_name = name
+                                break
+                        if outport_name is None:
+                            print("ERROR: Could not find matching MIDO output port!")
+                        else:
+                            outport = mido.open_output(outport_name)
+                            mid = mido.MidiFile(filepath)
+                            for msg in mid:
+                                if not midi_playback_active:
+                                    break  # Stop playback if reset was pressed
+                                time.sleep(msg.time)
+                                if not msg.is_meta:
+                                    outport.send(msg)
+                            outport.close()
+                        midi_playback_active = False
+                    playback_thread = threading.Thread(target=_play_mido, args=(midifilems, portnamems), daemon=True)
+                    playback_thread.start()
             previous_operation_mode = operation_mode
     update_display()
 
