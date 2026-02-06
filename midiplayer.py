@@ -85,7 +85,8 @@ def midi_callback(message_data, timestamp):
         program = message[1]
         #print(f"Program change to {program} on channel {channel}")
         fs.program_change(channel, program)
-    
+        return  # Program Change is 2 bytes - no note/velocity to read
+
     note = message[1]
     velocity = message[2]
    
